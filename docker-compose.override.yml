@@ -6,8 +6,14 @@ services:
     container_name: LibreChat
     labels:
       - 'traefik.enable=true'
+    networks:
+      - librechat_default
     env_file:
       - stack.env
     build:
       context: .
       target: node
+      
+networks:
+    librechat_default:
+        external: true
