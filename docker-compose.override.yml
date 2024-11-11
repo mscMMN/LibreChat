@@ -7,6 +7,7 @@ services:
     labels:
       - 'traefik.enable=true'
       - 'traefik.http.routers.librechat.rule=Host(`${TRAEFIK_HOST}`)'
+      - 'traefik.http.services.librechat.loadbalancer.server.port=3080'
     networks:
       - librechat_default
     env_file:
