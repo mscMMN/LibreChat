@@ -15,6 +15,9 @@ services:
       target: node
 
   mongodb:
+    build:
+      context: .
+      target: node
     networks:
       - librechat_default
       
