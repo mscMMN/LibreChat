@@ -20,8 +20,6 @@
 #     image: ghcr.io/danny-avila/librechat:latest
 
 # ---------------------------------------------------
-version: '3.4'
-
 services:
     api:
         labels:
