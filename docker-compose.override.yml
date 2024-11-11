@@ -1,0 +1,17 @@
+version: '3.4'
+
+services:
+    api:
+        labels:
+            - 'traefik.enable=true'
+        networks:
+            - web
+            - librechat_default
+        volumes:
+            - ./librechat.yaml:/app/librechat.yaml
+
+networks:
+    web:
+        external: true
+    librechat_default:
+        external: true
