@@ -6,7 +6,7 @@ services:
     container_name: LibreChat
     labels:
       - 'traefik.enable=true'
-     # - 'traefik.http.routers.librechat.rule=Host(`${TRAEFIK_HOST}`)'
+      - 'traefik.http.routers.librechat.rule=Host(`${TRAEFIK_HOST}`)'
     networks:
       - librechat_default
     env_file:
