@@ -10,7 +10,7 @@ services:
     env_file:
       - stack.env
     volumes:
-      - ./librechat/librechat.yaml:/app/librechat.yaml
+      - /etc/librechat/librechat.yaml:/app/librechat.yaml
     build:
       context: .
       target: node
