@@ -20,6 +20,8 @@ services:
     image: mongo:4.4.18
     networks:
       - librechat_default
+    env_file:
+      - stack.env
       
 networks:
     librechat_default:
