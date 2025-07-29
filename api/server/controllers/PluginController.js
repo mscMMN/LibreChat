@@ -1,6 +1,9 @@
-const { promises: fs } = require('fs');
-const { CacheKeys, AuthType } = require('librechat-data-provider');
-const { addOpenAPISpecs } = require('~/app/clients/tools/util/addOpenAPISpecs');
+const { logger } = require('@librechat/data-schemas');
+const { CacheKeys, AuthType, Constants } = require('librechat-data-provider');
+const { getCustomConfig, getCachedTools } = require('~/server/services/Config');
+const { getToolkitKey } = require('~/server/services/ToolService');
+const { getMCPManager, getFlowStateManager } = require('~/config');
+const { availableTools } = require('~/app/clients/tools');
 const { getLogStores } = require('~/cache');
 
 /**
@@ -57,10 +60,9 @@ const getAvailablePluginsController = async (req, res) => {
 
     /** @type {{ filteredTools: string[], includedTools: string[] }} */
     const { filteredTools = [], includedTools = [] } = req.app.locals;
-    const pluginManifest = await fs.readFile(req.app.locals.paths.pluginManifest, 'utf8');
-    const jsonData = JSON.parse(pluginManifest);
+    const pluginManifest = availableTools;
 
-    const uniquePlugins = filterUniquePlugins(jsonData);
+    const uniquePlugins = filterUniquePlugins(pluginManifest);
     let authenticatedPlugins = [];
     for (const plugin of uniquePlugins) {
       authenticatedPlugins.push(
@@ -68,7 +70,7 @@ const getAvailablePluginsController = async (req, res) => {
       );
     }
 
-    let plugins = await addOpenAPISpecs(authenticatedPlugins);
+    let plugins = authenticatedPlugins;
 
     if (includedTools.length > 0) {
       plugins = plugins.filter((plugin) => includedTools.includes(plugin.pluginKey));
@@ -82,6 +84,45 @@ const getAvailablePluginsController = async (req, res) => {
     res.status(500).json({ message: error.message });
   }
 };
+
+function createServerToolsCallback() {
+  /**
+   * @param {string} serverName
+   * @param {TPlugin[] | null} serverTools
+   */
+  return async function (serverName, serverTools) {
+    try {
+      const mcpToolsCache = getLogStores(CacheKeys.MCP_TOOLS);
+      if (!serverName || !mcpToolsCache) {
+        return;
+      }
+      await mcpToolsCache.set(serverName, serverTools);
+      logger.debug(`MCP tools for ${serverName} added to cache.`);
+    } catch (error) {
+      logger.error('Error retrieving MCP tools from cache:', error);
+    }
+  };
+}
+
+function createGetServerTools() {
+  /**
+   * Retrieves cached server tools
+   * @param {string} serverName
+   * @returns {Promise<TPlugin[] | null>}
+   */
+  return async function (serverName) {
+    try {
+      const mcpToolsCache = getLogStores(CacheKeys.MCP_TOOLS);
+      if (!mcpToolsCache) {
+        return null;
+      }
+      return await mcpToolsCache.get(serverName);
+    } catch (error) {
+      logger.error('Error retrieving MCP tools from cache:', error);
+      return null;
+    }
+  };
+}
 
 /**
  * Retrieves and returns a list of available tools, either from a cache or by reading a plugin manifest file.
@@ -97,18 +138,37 @@ const getAvailablePluginsController = async (req, res) => {
  */
 const getAvailableTools = async (req, res) => {
   try {
+    const userId = req.user?.id;
+    const customConfig = await getCustomConfig();
     const cache = getLogStores(CacheKeys.CONFIG_STORE);
-    const cachedTools = await cache.get(CacheKeys.TOOLS);
-    if (cachedTools) {
-      res.status(200).json(cachedTools);
+    const cachedToolsArray = await cache.get(CacheKeys.TOOLS);
+    const cachedUserTools = await getCachedTools({ userId });
+    const userPlugins = convertMCPToolsToPlugins(cachedUserTools, customConfig);
+
+    if (cachedToolsArray && userPlugins) {
+      const dedupedTools = filterUniquePlugins([...userPlugins, ...cachedToolsArray]);
+      res.status(200).json(dedupedTools);
       return;
     }
 
-    const pluginManifest = await fs.readFile(req.app.locals.paths.pluginManifest, 'utf8');
+    // If not in cache, build from manifest
+    let pluginManifest = availableTools;
+    if (customConfig?.mcpServers != null) {
+      const mcpManager = getMCPManager();
+      const flowsCache = getLogStores(CacheKeys.FLOWS);
+      const flowManager = flowsCache ? getFlowStateManager(flowsCache) : null;
+      const serverToolsCallback = createServerToolsCallback();
+      const getServerTools = createGetServerTools();
+      const mcpTools = await mcpManager.loadManifestTools({
+        flowManager,
+        serverToolsCallback,
+        getServerTools,
+      });
+      pluginManifest = [...mcpTools, ...pluginManifest];
+    }
 
-    const jsonData = JSON.parse(pluginManifest);
     /** @type {TPlugin[]} */
-    const uniquePlugins = filterUniquePlugins(jsonData);
+    const uniquePlugins = filterUniquePlugins(pluginManifest);
 
     const authenticatedPlugins = uniquePlugins.map((plugin) => {
       if (checkPluginAuth(plugin)) {
@@ -118,16 +178,114 @@ const getAvailableTools = async (req, res) => {
       }
     });
 
-    const tools = authenticatedPlugins.filter(
-      (plugin) => req.app.locals.availableTools[plugin.pluginKey] !== undefined,
-    );
+    const toolDefinitions = (await getCachedTools({ includeGlobal: true })) || {};
 
-    await cache.set(CacheKeys.TOOLS, tools);
-    res.status(200).json(tools);
+    const toolsOutput = [];
+    for (const plugin of authenticatedPlugins) {
+      const isToolDefined = toolDefinitions[plugin.pluginKey] !== undefined;
+      const isToolkit =
+        plugin.toolkit === true &&
+        Object.keys(toolDefinitions).some((key) => getToolkitKey(key) === plugin.pluginKey);
+
+      if (!isToolDefined && !isToolkit) {
+        continue;
+      }
+
+      const toolToAdd = { ...plugin };
+
+      if (!plugin.pluginKey.includes(Constants.mcp_delimiter)) {
+        toolsOutput.push(toolToAdd);
+        continue;
+      }
+
+      const parts = plugin.pluginKey.split(Constants.mcp_delimiter);
+      const serverName = parts[parts.length - 1];
+      const serverConfig = customConfig?.mcpServers?.[serverName];
+
+      if (!serverConfig?.customUserVars) {
+        toolsOutput.push(toolToAdd);
+        continue;
+      }
+
+      const customVarKeys = Object.keys(serverConfig.customUserVars);
+
+      if (customVarKeys.length === 0) {
+        toolToAdd.authConfig = [];
+        toolToAdd.authenticated = true;
+      } else {
+        toolToAdd.authConfig = Object.entries(serverConfig.customUserVars).map(([key, value]) => ({
+          authField: key,
+          label: value.title || key,
+          description: value.description || '',
+        }));
+        toolToAdd.authenticated = false;
+      }
+
+      toolsOutput.push(toolToAdd);
+    }
+    const finalTools = filterUniquePlugins(toolsOutput);
+    await cache.set(CacheKeys.TOOLS, finalTools);
+
+    const dedupedTools = filterUniquePlugins([...userPlugins, ...finalTools]);
+
+    res.status(200).json(dedupedTools);
   } catch (error) {
+    logger.error('[getAvailableTools]', error);
     res.status(500).json({ message: error.message });
   }
 };
+
+/**
+ * Converts MCP function format tools to plugin format
+ * @param {Object} functionTools - Object with function format tools
+ * @param {Object} customConfig - Custom configuration for MCP servers
+ * @returns {Array} Array of plugin objects
+ */
+function convertMCPToolsToPlugins(functionTools, customConfig) {
+  const plugins = [];
+
+  for (const [toolKey, toolData] of Object.entries(functionTools)) {
+    if (!toolData.function || !toolKey.includes(Constants.mcp_delimiter)) {
+      continue;
+    }
+
+    const functionData = toolData.function;
+    const parts = toolKey.split(Constants.mcp_delimiter);
+    const serverName = parts[parts.length - 1];
+
+    const serverConfig = customConfig?.mcpServers?.[serverName];
+
+    const plugin = {
+      name: parts[0], // Use the tool name without server suffix
+      pluginKey: toolKey,
+      description: functionData.description || '',
+      authenticated: true,
+      icon: serverConfig?.iconPath,
+    };
+
+    // Build authConfig for MCP tools
+    if (!serverConfig?.customUserVars) {
+      plugin.authConfig = [];
+      plugins.push(plugin);
+      continue;
+    }
+
+    const customVarKeys = Object.keys(serverConfig.customUserVars);
+    if (customVarKeys.length === 0) {
+      plugin.authConfig = [];
+    } else {
+      plugin.authConfig = Object.entries(serverConfig.customUserVars).map(([key, value]) => ({
+        authField: key,
+        label: value.title || key,
+        description: value.description || '',
+      }));
+    }
+
+    plugins.push(plugin);
+  }
+
+  return plugins;
+}
 
 module.exports = {
   getAvailableTools,

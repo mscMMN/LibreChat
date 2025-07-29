@@ -1,19 +1,13 @@
 const OpenAI = require('openai');
-const { HttpsProxyAgent } = require('https-proxy-agent');
-const {
-  ErrorTypes,
-  EModelEndpoint,
-  resolveHeaders,
-  mapModelToAzureConfig,
-} = require('librechat-data-provider');
+const { ProxyAgent } = require('undici');
+const { constructAzureURL, isUserProvided, resolveHeaders } = require('@librechat/api');
+const { ErrorTypes, EModelEndpoint, mapModelToAzureConfig } = require('librechat-data-provider');
 const {
   getUserKeyValues,
   getUserKeyExpiry,
   checkUserKeyExpiry,
 } = require('~/server/services/UserService');
 const OpenAIClient = require('~/app/clients/OpenAIClient');
-const { isUserProvided } = require('~/server/utils');
-const { constructAzureURL } = require('~/utils');
 
 class Files {
   constructor(client) {
@@ -115,11 +109,14 @@ const initializeClient = async ({ req, res, version, endpointOption, initAppClie
 
     apiKey = azureOptions.azureOpenAIApiKey;
     opts.defaultQuery = { 'api-version': azureOptions.azureOpenAIApiVersion };
-    opts.defaultHeaders = resolveHeaders({
-      ...headers,
-      'api-key': apiKey,
-      'OpenAI-Beta': `assistants=${version}`,
-    });
+    opts.defaultHeaders = resolveHeaders(
+      {
+        ...headers,
+        'api-key': apiKey,
+        'OpenAI-Beta': `assistants=${version}`,
+      },
+      req.user,
+    );
     opts.model = azureOptions.azureOpenAIApiDeploymentName;
 
     if (initAppClient) {
@@ -135,6 +132,12 @@ const initializeClient = async ({ req, res, version, endpointOption, initAppClie
       clientOptions.reverseProxyUrl = baseURL ?? clientOptions.reverseProxyUrl;
       clientOptions.headers = opts.defaultHeaders;
       clientOptions.azure = !serverless && azureOptions;
+      if (serverless === true) {
+        clientOptions.defaultQuery = azureOptions.azureOpenAIApiVersion
+          ? { 'api-version': azureOptions.azureOpenAIApiVersion }
+          : undefined;
+        clientOptions.headers['api-key'] = apiKey;
+      }
     }
   }
 
@@ -155,7 +158,10 @@ const initializeClient = async ({ req, res, version, endpointOption, initAppClie
   }
 
   if (PROXY) {
-    opts.httpAgent = new HttpsProxyAgent(PROXY);
+    const proxyAgent = new ProxyAgent(PROXY);
+    opts.fetchOptions = {
+      dispatcher: proxyAgent,
+    };
   }
 
   if (OPENAI_ORGANIZATION) {

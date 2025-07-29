@@ -1,28 +1,9 @@
 import dedent from 'dedent';
-import { ArtifactModes, shadcnComponents } from 'librechat-data-provider';
+import { shadcnComponents } from 'librechat-data-provider';
 import type {
   SandpackProviderProps,
   SandpackPredefinedTemplate,
 } from '@codesandbox/sandpack-react';
-
-export const getArtifactsMode = ({
-  codeArtifacts,
-  includeShadcnui,
-  customPromptMode,
-}: {
-  codeArtifacts: boolean;
-  includeShadcnui: boolean;
-  customPromptMode: boolean;
-}): ArtifactModes | undefined => {
-  if (!codeArtifacts) {
-    return undefined;
-  } else if (customPromptMode) {
-    return ArtifactModes.CUSTOM;
-  } else if (includeShadcnui) {
-    return ArtifactModes.SHADCNUI;
-  }
-  return ArtifactModes.DEFAULT;
-};
 
 const artifactFilename = {
   'application/vnd.mermaid': 'App.tsx',
@@ -119,7 +100,6 @@ const standardDependencies = {
   '@radix-ui/react-switch': '^1.0.3',
   '@radix-ui/react-tabs': '^1.0.3',
   '@radix-ui/react-toast': '^1.1.5',
-  '@radix-ui/react-tooltip': '^1.0.6',
   '@radix-ui/react-slot': '^1.1.0',
   '@radix-ui/react-toggle': '^1.1.0',
   '@radix-ui/react-toggle-group': '^1.1.0',
@@ -131,7 +111,7 @@ const standardDependencies = {
 
 const mermaidDependencies = Object.assign(
   {
-    mermaid: '^11.0.2',
+    mermaid: '^11.4.1',
     'react-zoom-pan-pinch': '^3.6.1',
   },
   standardDependencies,
@@ -215,23 +195,3 @@ export const sharedFiles = {
     </html>
   `,
 };
-
-export function preprocessCodeArtifacts(text?: string): string {
-  if (typeof text !== 'string') {
-    return '';
-  }
-
-  // Remove <thinking> tags and their content
-  text = text.replace(/<thinking>[\s\S]*?<\/thinking>|<thinking>[\s\S]*/g, '');
-
-  // Process artifact headers
-  const regex = /(^|\n)(:::artifact[\s\S]*?(?:```[\s\S]*?```|$))/g;
-  return text.replace(regex, (match, newline, artifactBlock) => {
-    if (artifactBlock.includes('```') === true) {
-      // Keep artifact headers with code blocks (empty or not)
-      return newline + artifactBlock;
-    }
-    // Remove artifact headers without code blocks, but keep the newline
-    return newline;
-  });
-}

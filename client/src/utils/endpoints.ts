@@ -7,19 +7,21 @@ import {
   isAssistantsEndpoint,
 } from 'librechat-data-provider';
 import type * as t from 'librechat-data-provider';
-import type { LocalizeFunction } from '~/common';
+import type { LocalizeFunction, IconsRecord } from '~/common';
 
-export const getAssistantName = ({
+export const getEntityName = ({
   name = '',
   localize,
+  isAgent,
 }: {
   name?: string;
+  isAgent?: boolean;
   localize: LocalizeFunction;
 }) => {
   if (name && name.length > 0) {
     return name;
   } else {
-    return localize('com_ui_assistant');
+    return isAgent === true ? localize('com_ui_agent') : localize('com_ui_assistant');
   }
 };
 
@@ -57,7 +59,7 @@ export const getAvailableEndpoints = (
 
 /** Get the specified field from the endpoint config */
 export function getEndpointField<K extends keyof t.TConfig>(
-  endpointsConfig: t.TEndpointsConfig | undefined,
+  endpointsConfig: t.TEndpointsConfig | undefined | null,
   endpoint: EModelEndpoint | string | null | undefined,
   property: K,
 ): t.TConfig[K] | undefined {
@@ -96,14 +98,18 @@ export function updateLastSelectedModel({
     return;
   }
   /* Note: an empty string value is possible */
-  const lastConversationSetup = JSON.parse((localStorage.getItem(firstLocalConvoKey) ?? '{}') || '{}');
+  const lastConversationSetup = JSON.parse(
+    (localStorage.getItem(firstLocalConvoKey) ?? '{}') || '{}',
+  );
 
   if (lastConversationSetup.endpoint === endpoint) {
     lastConversationSetup.model = model;
     localStorage.setItem(firstLocalConvoKey, JSON.stringify(lastConversationSetup));
   }
 
-  const lastSelectedModels = JSON.parse((localStorage.getItem(LocalStorageKeys.LAST_MODEL) ?? '{}') || '{}');
+  const lastSelectedModels = JSON.parse(
+    (localStorage.getItem(LocalStorageKeys.LAST_MODEL) ?? '{}') || '{}',
+  );
   lastSelectedModels[endpoint] = model;
   localStorage.setItem(LocalStorageKeys.LAST_MODEL, JSON.stringify(lastSelectedModels));
 }
@@ -174,11 +180,38 @@ export function getConvoSwitchLogic(params: ConversationInitParams): InitiatedTe
  *
  * First, the admin defined default, then last selected spec, followed by first spec
  */
-export function getDefaultModelSpec(modelSpecs?: t.TModelSpec[]) {
-  const defaultSpec = modelSpecs?.find((spec) => spec.default);
-  const lastSelectedSpecName = localStorage.getItem(LocalStorageKeys.LAST_SPEC);
-  const lastSelectedSpec = modelSpecs?.find((spec) => spec.name === lastSelectedSpecName);
-  return defaultSpec || lastSelectedSpec || modelSpecs?.[0];
+export function getDefaultModelSpec(startupConfig?: t.TStartupConfig) {
+  const { modelSpecs, interface: interfaceConfig } = startupConfig ?? {};
+  const { list, prioritize } = modelSpecs ?? {};
+  if (!list) {
+    return;
+  }
+  const defaultSpec = list?.find((spec) => spec.default);
+  if (prioritize === true || !interfaceConfig?.modelSelect) {
+    const lastSelectedSpecName = localStorage.getItem(LocalStorageKeys.LAST_SPEC);
+    const lastSelectedSpec = list?.find((spec) => spec.name === lastSelectedSpecName);
+    return defaultSpec || lastSelectedSpec || list?.[0];
+  } else if (defaultSpec) {
+    return defaultSpec;
+  }
+  const lastConversationSetup = JSON.parse(
+    localStorage.getItem(LocalStorageKeys.LAST_CONVO_SETUP + '_0') ?? '{}',
+  );
+  if (!lastConversationSetup.spec) {
+    return;
+  }
+  return list?.find((spec) => spec.name === lastConversationSetup.spec);
+}
+
+export function getModelSpecPreset(modelSpec?: t.TModelSpec) {
+  if (!modelSpec) {
+    return;
+  }
+  return {
+    ...modelSpec.preset,
+    spec: modelSpec.name,
+    iconURL: getModelSpecIconURL(modelSpec),
+  };
 }
 
 /** Gets the default spec iconURL by order or definition.
@@ -198,11 +231,11 @@ export function getIconEndpoint({
   iconURL,
   endpoint,
 }: {
-  endpointsConfig: t.TEndpointsConfig | undefined;
-  iconURL: string | undefined;
-  endpoint: string | null | undefined;
+  endpointsConfig?: t.TEndpointsConfig;
+  iconURL?: string | null;
+  endpoint?: string | null;
 }) {
-  return (endpointsConfig?.[iconURL ?? ''] ? iconURL ?? endpoint : endpoint) ?? '';
+  return (endpointsConfig?.[iconURL ?? ''] ? (iconURL ?? endpoint) : endpoint) ?? '';
 }
 
 /** Gets the key to use for the default endpoint iconURL, as defined by the custom config */
@@ -213,16 +246,16 @@ export function getIconKey({
   endpointIconURL: iconURL,
 }: {
   endpoint?: string | null;
-  endpointsConfig?: t.TEndpointsConfig | undefined;
+  endpointsConfig?: t.TEndpointsConfig | null;
   endpointType?: string | null;
   endpointIconURL?: string;
-}) {
+}): keyof IconsRecord {
   const endpointType = _eType ?? getEndpointField(endpointsConfig, endpoint, 'type') ?? '';
   const endpointIconURL = iconURL ?? getEndpointField(endpointsConfig, endpoint, 'iconURL') ?? '';
   if (endpointIconURL && EModelEndpoint[endpointIconURL] != null) {
     return endpointIconURL;
   }
-  return endpointType ? 'unknown' : endpoint ?? 'unknown';
+  return endpointType ? 'unknown' : (endpoint ?? 'unknown');
 }
 
 export const getEntity = ({

@@ -1,9 +1,10 @@
-// Code Files
-const axios = require('axios');
 const FormData = require('form-data');
 const { getCodeBaseURL } = require('@librechat/agents');
+const { createAxiosInstance, logAxiosError } = require('@librechat/api');
 
-const MAX_FILE_SIZE = 25 * 1024 * 1024;
+const axios = createAxiosInstance();
+
+const MAX_FILE_SIZE = 150 * 1024 * 1024;
 
 /**
  * Retrieves a download stream for a specified file.
@@ -15,7 +16,8 @@ const MAX_FILE_SIZE = 25 * 1024 * 1024;
 async function getCodeOutputDownloadStream(fileIdentifier, apiKey) {
   try {
     const baseURL = getCodeBaseURL();
-    const response = await axios({
+    /** @type {import('axios').AxiosRequestConfig} */
+    const options = {
       method: 'get',
       url: `${baseURL}/download/${fileIdentifier}`,
       responseType: 'stream',
@@ -24,11 +26,17 @@ async function getCodeOutputDownloadStream(fileIdentifier, apiKey) {
         'X-API-Key': apiKey,
       },
       timeout: 15000,
-    });
+    };
 
+    const response = await axios(options);
     return response;
   } catch (error) {
-    throw new Error(`Error downloading file: ${error.message}`);
+    throw new Error(
+      logAxiosError({
+        message: `Error downloading code environment file stream: ${error.message}`,
+        error,
+      }),
+    );
   }
 }
 
@@ -40,16 +48,21 @@ async function getCodeOutputDownloadStream(fileIdentifier, apiKey) {
  * @param {import('fs').ReadStream | import('stream').Readable} params.stream - The read stream for the file.
  * @param {string} params.filename - The name of the file.
  * @param {string} params.apiKey - The API key for authentication.
+ * @param {string} [params.entity_id] - Optional entity ID for the file.
  * @returns {Promise<string>}
  * @throws {Error} If there's an error during the upload process.
  */
-async function uploadCodeEnvFile({ req, stream, filename, apiKey }) {
+async function uploadCodeEnvFile({ req, stream, filename, apiKey, entity_id = '' }) {
   try {
     const form = new FormData();
+    if (entity_id.length > 0) {
+      form.append('entity_id', entity_id);
+    }
     form.append('file', stream, filename);
 
     const baseURL = getCodeBaseURL();
-    const response = await axios.post(`${baseURL}/upload`, form, {
+    /** @type {import('axios').AxiosRequestConfig} */
+    const options = {
       headers: {
         ...form.getHeaders(),
         'Content-Type': 'multipart/form-data',
@@ -59,7 +72,9 @@ async function uploadCodeEnvFile({ req, stream, filename, apiKey }) {
       },
       maxContentLength: MAX_FILE_SIZE,
       maxBodyLength: MAX_FILE_SIZE,
-    });
+    };
+
+    const response = await axios.post(`${baseURL}/upload`, form, options);
 
     /** @type {{ message: string; session_id: string; files: Array<{ fileId: string; filename: string }> }} */
     const result = response.data;
@@ -67,9 +82,19 @@ async function uploadCodeEnvFile({ req, stream, filename, apiKey }) {
       throw new Error(`Error uploading file: ${result.message}`);
     }
 
-    return `${result.session_id}/${result.files[0].fileId}`;
+    const fileIdentifier = `${result.session_id}/${result.files[0].fileId}`;
+    if (entity_id.length === 0) {
+      return fileIdentifier;
+    }
+
+    return `${fileIdentifier}?entity_id=${entity_id}`;
   } catch (error) {
-    throw new Error(`Error uploading file: ${error.message}`);
+    throw new Error(
+      logAxiosError({
+        message: `Error uploading code environment file: ${error.message}`,
+        error,
+      }),
+    );
   }
 }
 

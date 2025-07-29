@@ -1,13 +1,16 @@
 import { createBrowserRouter, Navigate, Outlet } from 'react-router-dom';
 import {
   Login,
-  Registration,
-  RequestPasswordReset,
-  ResetPassword,
   VerifyEmail,
+  Registration,
+  ResetPassword,
   ApiErrorWatcher,
+  TwoFactorScreen,
+  RequestPasswordReset,
 } from '~/components/Auth';
+import { OAuthSuccess, OAuthError } from '~/components/OAuth';
 import { AuthContextProvider } from '~/hooks/AuthContext';
+import RouteErrorBoundary from './RouteErrorBoundary';
 import StartupLayout from './Layouts/Startup';
 import LoginLayout from './Layouts/Login';
 import dashboardRoutes from './Dashboard';
@@ -27,10 +30,26 @@ export const router = createBrowserRouter([
   {
     path: 'share/:shareId',
     element: <ShareRoute />,
+    errorElement: <RouteErrorBoundary />,
+  },
+  {
+    path: 'oauth',
+    errorElement: <RouteErrorBoundary />,
+    children: [
+      {
+        path: 'success',
+        element: <OAuthSuccess />,
+      },
+      {
+        path: 'error',
+        element: <OAuthError />,
+      },
+    ],
   },
   {
     path: '/',
     element: <StartupLayout />,
+    errorElement: <RouteErrorBoundary />,
     children: [
       {
         path: 'register',
@@ -49,9 +68,11 @@ export const router = createBrowserRouter([
   {
     path: 'verify',
     element: <VerifyEmail />,
+    errorElement: <RouteErrorBoundary />,
   },
   {
     element: <AuthLayout />,
+    errorElement: <RouteErrorBoundary />,
     children: [
       {
         path: '/',
@@ -60,6 +81,10 @@ export const router = createBrowserRouter([
           {
             path: 'login',
             element: <Login />,
+          },
+          {
+            path: 'login/2fa',
+            element: <TwoFactorScreen />,
           },
         ],
       },

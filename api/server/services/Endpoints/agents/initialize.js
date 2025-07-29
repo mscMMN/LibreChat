@@ -1,29 +1,47 @@
-const { createContentAggregator, Providers } = require('@librechat/agents');
+const { logger } = require('@librechat/data-schemas');
+const { createContentAggregator } = require('@librechat/agents');
 const {
+  Constants,
   EModelEndpoint,
+  isAgentsEndpoint,
   getResponseSender,
-  providerEndpointMap,
 } = require('librechat-data-provider');
 const {
-  getDefaultHandlers,
   createToolEndCallback,
+  getDefaultHandlers,
 } = require('~/server/controllers/agents/callbacks');
-const initAnthropic = require('~/server/services/Endpoints/anthropic/initialize');
-const getBedrockOptions = require('~/server/services/Endpoints/bedrock/options');
-const initOpenAI = require('~/server/services/Endpoints/openAI/initialize');
-const initCustom = require('~/server/services/Endpoints/custom/initialize');
+const { initializeAgent } = require('~/server/services/Endpoints/agents/agent');
 const { getCustomEndpointConfig } = require('~/server/services/Config');
 const { loadAgentTools } = require('~/server/services/ToolService');
 const AgentClient = require('~/server/controllers/agents/client');
-const { getModelMaxTokens } = require('~/utils');
+const { getAgent } = require('~/models/Agent');
 
-const providerConfigMap = {
-  [EModelEndpoint.openAI]: initOpenAI,
-  [EModelEndpoint.azureOpenAI]: initOpenAI,
-  [EModelEndpoint.anthropic]: initAnthropic,
-  [EModelEndpoint.bedrock]: getBedrockOptions,
-  [Providers.OLLAMA]: initCustom,
-};
+function createToolLoader() {
+  /**
+   * @param {object} params
+   * @param {ServerRequest} params.req
+   * @param {ServerResponse} params.res
+   * @param {string} params.agentId
+   * @param {string[]} params.tools
+   * @param {string} params.provider
+   * @param {string} params.model
+   * @param {AgentToolResources} params.tool_resources
+   * @returns {Promise<{ tools: StructuredTool[], toolContextMap: Record<string, unknown> } | undefined>}
+   */
+  return async function loadTools({ req, res, agentId, tools, provider, model, tool_resources }) {
+    const agent = { id: agentId, tools, provider, model };
+    try {
+      return await loadAgentTools({
+        req,
+        res,
+        agent,
+        tool_resources,
+      });
+    } catch (error) {
+      logger.error('Error loading tools for agent ' + agentId, error);
+    }
+  };
+}
 
 const initializeClient = async ({ req, res, endpointOption }) => {
   if (!endpointOption) {
@@ -48,70 +66,99 @@ const initializeClient = async ({ req, res, endpointOption }) => {
     throw new Error('No agent promise provided');
   }
 
-  /** @type {Agent | null} */
-  const agent = await endpointOption.agent;
-  if (!agent) {
+  const primaryAgent = await endpointOption.agent;
+  delete endpointOption.agent;
+  if (!primaryAgent) {
     throw new Error('Agent not found');
   }
 
-  const { tools } = await loadAgentTools({
-    req,
-    tools: agent.tools,
-    agent_id: agent.id,
-    tool_resources: agent.tool_resources,
-  });
+  const agentConfigs = new Map();
+  /** @type {Set<string>} */
+  const allowedProviders = new Set(req?.app?.locals?.[EModelEndpoint.agents]?.allowedProviders);
 
-  const provider = agent.provider;
-  let modelOptions = { model: agent.model };
-  let getOptions = providerConfigMap[provider];
-  if (!getOptions) {
-    const customEndpointConfig = await getCustomEndpointConfig(provider);
-    if (!customEndpointConfig) {
-      throw new Error(`Provider ${provider} not supported`);
-    }
-    getOptions = initCustom;
-    agent.provider = Providers.OPENAI;
-    agent.endpoint = provider.toLowerCase();
-  }
+  const loadTools = createToolLoader();
+  /** @type {Array<MongoFile>} */
+  const requestFiles = req.body.files ?? [];
+  /** @type {string} */
+  const conversationId = req.body.conversationId;
 
-  // TODO: pass-in override settings that are specific to current run
-  endpointOption.model_parameters.model = agent.model;
-  const options = await getOptions({
+  const primaryConfig = await initializeAgent({
     req,
     res,
+    loadTools,
+    requestFiles,
+    conversationId,
+    agent: primaryAgent,
     endpointOption,
-    optionsOnly: true,
-    overrideEndpoint: provider,
-    overrideModel: agent.model,
+    allowedProviders,
+    isInitialAgent: true,
   });
 
-  modelOptions = Object.assign(modelOptions, options.llmConfig);
-  if (options.configOptions) {
-    modelOptions.configuration = options.configOptions;
+  const agent_ids = primaryConfig.agent_ids;
+  if (agent_ids?.length) {
+    for (const agentId of agent_ids) {
+      const agent = await getAgent({ id: agentId });
+      if (!agent) {
+        throw new Error(`Agent ${agentId} not found`);
+      }
+      const config = await initializeAgent({
+        req,
+        res,
+        agent,
+        loadTools,
+        requestFiles,
+        conversationId,
+        endpointOption,
+        allowedProviders,
+      });
+      agentConfigs.set(agentId, config);
+    }
   }
 
-  const sender = getResponseSender({
-    ...endpointOption,
-    model: endpointOption.model_parameters.model,
-  });
+  let endpointConfig = req.app.locals[primaryConfig.endpoint];
+  if (!isAgentsEndpoint(primaryConfig.endpoint) && !endpointConfig) {
+    try {
+      endpointConfig = await getCustomEndpointConfig(primaryConfig.endpoint);
+    } catch (err) {
+      logger.error(
+        '[api/server/controllers/agents/client.js #titleConvo] Error getting custom endpoint config',
+        err,
+      );
+    }
+  }
+
+  const sender =
+    primaryAgent.name ??
+    getResponseSender({
+      ...endpointOption,
+      model: endpointOption.model_parameters.model,
+      modelDisplayLabel: endpointConfig?.modelDisplayLabel,
+      modelLabel: endpointOption.model_parameters.modelLabel,
+    });
 
   const client = new AgentClient({
     req,
-    agent,
-    tools,
+    res,
     sender,
     contentParts,
-    modelOptions,
+    agentConfigs,
     eventHandlers,
     collectedUsage,
+    aggregateContent,
     artifactPromises,
-    endpoint: EModelEndpoint.agents,
-    attachments: endpointOption.attachments,
-    maxContextTokens:
-      agent.max_context_tokens ??
-      getModelMaxTokens(modelOptions.model, providerEndpointMap[provider]) ??
-      4000,
+    agent: primaryConfig,
+    spec: endpointOption.spec,
+    iconURL: endpointOption.iconURL,
+    attachments: primaryConfig.attachments,
+    endpointType: endpointOption.endpointType,
+    resendFiles: primaryConfig.resendFiles ?? true,
+    maxContextTokens: primaryConfig.maxContextTokens,
+    endpoint:
+      primaryConfig.id === Constants.EPHEMERAL_AGENT_ID
+        ? primaryConfig.endpoint
+        : EModelEndpoint.agents,
   });
+
   return { client };
 };
 

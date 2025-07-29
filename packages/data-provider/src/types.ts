@@ -1,69 +1,138 @@
-import OpenAI from 'openai';
 import type { InfiniteData } from '@tanstack/react-query';
 import type {
+  TBanner,
   TMessage,
   TResPlugin,
-  ImageDetail,
   TSharedLink,
   TConversation,
   EModelEndpoint,
   TConversationTag,
-  TBanner,
+  TAttachment,
 } from './schemas';
-import type { TSpecsConfig } from './models';
-export type TOpenAIMessage = OpenAI.Chat.ChatCompletionMessageParam;
-export type TOpenAIFunction = OpenAI.Chat.ChatCompletionCreateParams.Function;
-export type TOpenAIFunctionCall = OpenAI.Chat.ChatCompletionCreateParams.FunctionCallOption;
+import type { SettingDefinition } from './generate';
+import type { TMinimalFeedback } from './feedback';
+import type { Agent } from './types/assistants';
 
 export * from './schemas';
 
 export type TMessages = TMessage[];
 
-export type TMessagesAtom = TMessages | null;
-
 /* TODO: Cleanup EndpointOption types */
-export type TEndpointOption = {
-  endpoint: EModelEndpoint;
-  endpointType?: EModelEndpoint;
+export type TEndpointOption = Pick<
+  TConversation,
+  // Core conversation fields
+  | 'endpoint'
+  | 'endpointType'
+  | 'model'
+  | 'modelLabel'
+  | 'chatGptLabel'
+  | 'promptPrefix'
+  | 'temperature'
+  | 'topP'
+  | 'topK'
+  | 'top_p'
+  | 'frequency_penalty'
+  | 'presence_penalty'
+  | 'maxOutputTokens'
+  | 'maxContextTokens'
+  | 'max_tokens'
+  | 'maxTokens'
+  | 'resendFiles'
+  | 'imageDetail'
+  | 'reasoning_effort'
+  | 'instructions'
+  | 'additional_instructions'
+  | 'append_current_datetime'
+  | 'tools'
+  | 'stop'
+  | 'region'
+  | 'additionalModelRequestFields'
+  // Anthropic-specific
+  | 'promptCache'
+  | 'thinking'
+  | 'thinkingBudget'
+  // Assistant/Agent fields
+  | 'assistant_id'
+  | 'agent_id'
+  // UI/Display fields
+  | 'iconURL'
+  | 'greeting'
+  | 'spec'
+  // Artifacts
+  | 'artifacts'
+  // Files
+  | 'file_ids'
+  // System field
+  | 'system'
+  // Google examples
+  | 'examples'
+  // Context
+  | 'context'
+> & {
+  // Fields specific to endpoint options that don't exist on TConversation
   modelDisplayLabel?: string;
-  resendFiles?: boolean;
-  promptCache?: boolean;
-  maxContextTokens?: number;
-  imageDetail?: ImageDetail;
-  model?: string | null;
-  promptPrefix?: string;
-  temperature?: number;
-  chatGptLabel?: string | null;
-  modelLabel?: string | null;
-  jailbreak?: boolean;
   key?: string | null;
-  /* assistant */
+  /** @deprecated Assistants API */
   thread_id?: string;
-  /* multi-response stream */
+  // Conversation identifiers for multi-response streams
   overrideConvoId?: string;
   overrideUserMessageId?: string;
+  // Model parameters (used by different endpoints)
+  modelOptions?: Record<string, unknown>;
+  model_parameters?: Record<string, unknown>;
+  // Configuration data (added by middleware)
+  modelsConfig?: TModelsConfig;
+  // File attachments (processed by middleware)
+  attachments?: TAttachment[];
+  // Generated prompts
+  artifactsPrompt?: string;
+  // Agent-specific fields
+  agent?: Promise<Agent>;
+  // Client-specific options
+  clientOptions?: Record<string, unknown>;
+};
+
+export type TEphemeralAgent = {
+  mcp?: string[];
+  web_search?: boolean;
+  file_search?: boolean;
+  execute_code?: boolean;
 };
 
 export type TPayload = Partial<TMessage> &
   Partial<TEndpointOption> & {
     isContinued: boolean;
+    isRegenerate?: boolean;
     conversationId: string | null;
     messages?: TMessages;
+    isTemporary: boolean;
+    ephemeralAgent?: TEphemeralAgent | null;
+    editedContent?: {
+      index: number;
+      text: string;
+      type: 'text' | 'think';
+    } | null;
   };
 
 export type TSubmission = {
-  artifacts?: string;
   plugin?: TResPlugin;
   plugins?: TResPlugin[];
   userMessage: TMessage;
   isEdited?: boolean;
   isContinued?: boolean;
+  isTemporary: boolean;
   messages: TMessage[];
   isRegenerate?: boolean;
-  conversationId?: string;
   initialResponse?: TMessage;
   conversation: Partial<TConversation>;
   endpointOption: TEndpointOption;
+  clientTimestamp?: string;
+  ephemeralAgent?: TEphemeralAgent | null;
+  editedContent?: {
+    index: number;
+    text: string;
+    type: 'text' | 'think';
+  } | null;
 };
 
 export type EventSubmission = Omit<TSubmission, 'initialResponse'> & { initialResponse: TMessage };
@@ -71,7 +140,7 @@ export type EventSubmission = Omit<TSubmission, 'initialResponse'> & { initialRe
 export type TPluginAction = {
   pluginKey: string;
   action: 'install' | 'uninstall';
-  auth?: unknown;
+  auth?: Partial<Record<string, string>> | null;
   isEntityTool?: boolean;
 };
 
@@ -81,9 +150,10 @@ export type TUpdateUserPlugins = {
   isEntityTool?: boolean;
   pluginKey: string;
   action: string;
-  auth?: unknown;
+  auth?: Partial<Record<string, string | null>> | null;
 };
 
+// TODO `label` needs to be changed to the proper `TranslationKeys`
 export type TCategory = {
   id?: string;
   value: string;
@@ -101,6 +171,12 @@ export type TError = {
   };
 };
 
+export type TBackupCode = {
+  codeHash: string;
+  used: boolean;
+  usedAt: Date | null;
+};
+
 export type TUser = {
   id: string;
   username: string;
@@ -109,7 +185,12 @@ export type TUser = {
   avatar: string;
   role: string;
   provider: string;
-  plugins: string[];
+  plugins?: string[];
+  twoFactorEnabled?: boolean;
+  backupCodes?: TBackupCode[];
+  personalization?: {
+    memories?: boolean;
+  };
   createdAt: string;
   updatedAt: string;
 };
@@ -174,15 +255,17 @@ export type TArchiveConversationResponse = TConversation;
 export type TSharedMessagesResponse = Omit<TSharedLink, 'messages'> & {
   messages: TMessage[];
 };
-export type TSharedLinkRequest = Partial<
-  Omit<TSharedLink, 'messages' | 'createdAt' | 'updatedAt'>
-> & {
-  conversationId: string;
-};
 
-export type TSharedLinkResponse = TSharedLink;
-export type TSharedLinksResponse = TSharedLink[];
-export type TDeleteSharedLinkResponse = TSharedLink;
+export type TCreateShareLinkRequest = Pick<TConversation, 'conversationId'>;
+
+export type TUpdateShareLinkRequest = Pick<TSharedLink, 'shareId'>;
+
+export type TSharedLinkResponse = Pick<TSharedLink, 'shareId'> &
+  Pick<TConversation, 'conversationId'>;
+
+export type TSharedLinkGetResponse = TSharedLinkResponse & {
+  success: boolean;
+};
 
 // type for getting conversation tags
 export type TConversationTagsResponse = TConversationTag[];
@@ -196,11 +279,21 @@ export type TConversationTagRequest = Partial<
 
 export type TConversationTagResponse = TConversationTag;
 
-// type for tagging conversation
 export type TTagConversationRequest = {
   tags: string[];
+  tag: string;
 };
+
 export type TTagConversationResponse = string[];
+
+export type TDuplicateConvoRequest = {
+  conversationId?: string;
+};
+
+export type TDuplicateConvoResponse = {
+  conversation: TConversation;
+  messages: TMessage[];
+};
 
 export type TForkConvoRequest = {
   messageId: string;
@@ -240,6 +333,10 @@ export type TConfig = {
   disableBuilder?: boolean;
   retrievalModels?: string[];
   capabilities?: string[];
+  customParams?: {
+    defaultParamsEndpoint?: string;
+    paramDefinitions?: SettingDefinition[];
+  };
 };
 
 export type TEndpointsConfig =
@@ -274,11 +371,61 @@ export type TRegisterUser = {
 export type TLoginUser = {
   email: string;
   password: string;
+  token?: string;
+  backupCode?: string;
 };
 
 export type TLoginResponse = {
-  token: string;
-  user: TUser;
+  token?: string;
+  user?: TUser;
+  twoFAPending?: boolean;
+  tempToken?: string;
+};
+
+export type TEnable2FAResponse = {
+  otpauthUrl: string;
+  backupCodes: string[];
+  message?: string;
+};
+
+export type TVerify2FARequest = {
+  token?: string;
+  backupCode?: string;
+};
+
+export type TVerify2FAResponse = {
+  message: string;
+};
+
+/**
+ * For verifying 2FA during login with a temporary token.
+ */
+export type TVerify2FATempRequest = {
+  tempToken: string;
+  token?: string;
+  backupCode?: string;
+};
+
+export type TVerify2FATempResponse = {
+  token?: string;
+  user?: TUser;
+  message?: string;
+};
+
+/**
+ * Response from disabling 2FA.
+ */
+export type TDisable2FAResponse = {
+  message: string;
+};
+
+/**
+ * Response from regenerating backup codes.
+ */
+export type TRegenerateBackupCodesResponse = {
+  message: string;
+  backupCodes: string[];
+  backupCodesHash: string[];
 };
 
 export type TRequestPasswordReset = {
@@ -300,63 +447,6 @@ export type TVerifyEmail = {
 };
 
 export type TResendVerificationEmail = Omit<TVerifyEmail, 'token'>;
-
-export type TInterfaceConfig = {
-  privacyPolicy?: {
-    externalUrl?: string;
-    openNewTab?: boolean;
-  };
-  termsOfService?: {
-    externalUrl?: string;
-    openNewTab?: boolean;
-    modalAcceptance?: boolean;
-    modalTitle?: string;
-    modalContent?: string;
-  };
-  endpointsMenu: boolean;
-  modelSelect: boolean;
-  parameters: boolean;
-  sidePanel: boolean;
-  presets: boolean;
-  multiConvo: boolean;
-  bookmarks: boolean;
-  prompts: boolean;
-};
-
-export type TStartupConfig = {
-  appTitle: string;
-  socialLogins?: string[];
-  interface?: TInterfaceConfig;
-  discordLoginEnabled: boolean;
-  facebookLoginEnabled: boolean;
-  githubLoginEnabled: boolean;
-  googleLoginEnabled: boolean;
-  openidLoginEnabled: boolean;
-  openidLabel: string;
-  openidImageUrl: string;
-  /** LDAP Auth Configuration */
-  ldap?: {
-    /** LDAP enabled */
-    enabled: boolean;
-    /** Whether LDAP uses username vs. email */
-    username?: boolean;
-  };
-  serverDomain: string;
-  emailLoginEnabled: boolean;
-  registrationEnabled: boolean;
-  socialLoginEnabled: boolean;
-  passwordResetEnabled: boolean;
-  emailEnabled: boolean;
-  checkBalance: boolean;
-  showBirthdayIcon: boolean;
-  helpAndFaqURL: string;
-  customFooter?: string;
-  modelSpecs?: TSpecsConfig;
-  sharedLinksEnabled: boolean;
-  publicSharedLinksEnabled: boolean;
-  analyticsGtmId?: string;
-  instanceProjectId: string;
-};
 
 export type TRefreshTokenResponse = {
   token: string;
@@ -491,9 +581,7 @@ export type TUpdatePromptLabelsResponse = {
   message: string;
 };
 
-export type TDeletePromptGroupResponse = {
-  promptGroup: string;
-};
+export type TDeletePromptGroupResponse = TUpdatePromptLabelsResponse;
 
 export type TDeletePromptGroupRequest = {
   id: string;
@@ -521,3 +609,23 @@ export type TAcceptTermsResponse = {
 };
 
 export type TBannerResponse = TBanner | null;
+
+export type TUpdateFeedbackRequest = {
+  feedback?: TMinimalFeedback;
+};
+
+export type TUpdateFeedbackResponse = {
+  messageId: string;
+  conversationId: string;
+  feedback?: TMinimalFeedback;
+};
+
+export type TBalanceResponse = {
+  tokenCredits: number;
+  // Automatic refill settings
+  autoRefillEnabled: boolean;
+  refillIntervalValue?: number;
+  refillIntervalUnit?: 'seconds' | 'minutes' | 'hours' | 'days' | 'weeks' | 'months';
+  lastRefill?: Date;
+  refillAmount?: number;
+};

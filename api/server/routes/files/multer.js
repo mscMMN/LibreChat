@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const multer = require('multer');
+const { sanitizeFilename } = require('@librechat/api');
 const { fileConfig: defaultFileConfig, mergeFileConfig } = require('librechat-data-provider');
 const { getCustomConfig } = require('~/server/services/Config');
 
@@ -16,7 +17,8 @@ const storage = multer.diskStorage({
   filename: function (req, file, cb) {
     req.file_id = crypto.randomUUID();
     file.originalname = decodeURIComponent(file.originalname);
-    cb(null, `${file.originalname}`);
+    const sanitizedFilename = sanitizeFilename(file.originalname);
+    cb(null, sanitizedFilename);
   },
 });
 
@@ -43,6 +45,10 @@ const createFileFilter = (customFileConfig) => {
   const fileFilter = (req, file, cb) => {
     if (!file) {
       return cb(new Error('No file provided'), false);
+    }
+
+    if (req.originalUrl.endsWith('/speech/stt') && file.mimetype.startsWith('audio/')) {
+      return cb(null, true);
     }
 
     const endpoint = req.body.endpoint;

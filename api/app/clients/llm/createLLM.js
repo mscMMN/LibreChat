@@ -1,6 +1,5 @@
-const { ChatOpenAI } = require('langchain/chat_models/openai');
-const { sanitizeModelName, constructAzureURL } = require('~/utils');
-const { isEnabled } = require('~/server/utils');
+const { ChatOpenAI } = require('@langchain/openai');
+const { isEnabled, sanitizeModelName, constructAzureURL } = require('@librechat/api');
 
 /**
  * Creates a new instance of a language model (LLM) for chat interactions.
@@ -17,7 +16,7 @@ const { isEnabled } = require('~/server/utils');
  *
  * @example
  * const llm = createLLM({
- *   modelOptions: { modelName: 'gpt-3.5-turbo', temperature: 0.2 },
+ *   modelOptions: { modelName: 'gpt-4o-mini', temperature: 0.2 },
  *   configOptions: { basePath: 'https://example.api/path' },
  *   callbacks: { onMessage: handleMessage },
  *   openAIApiKey: 'your-api-key'
@@ -34,6 +33,7 @@ function createLLM({
   let credentials = { openAIApiKey };
   let configuration = {
     apiKey: openAIApiKey,
+    ...(configOptions.basePath && { baseURL: configOptions.basePath }),
   };
 
   /**  @type {AzureOptions} */

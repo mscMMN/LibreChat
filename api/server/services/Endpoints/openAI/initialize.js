@@ -1,14 +1,14 @@
+const { ErrorTypes, EModelEndpoint, mapModelToAzureConfig } = require('librechat-data-provider');
 const {
-  ErrorTypes,
-  EModelEndpoint,
+  isEnabled,
   resolveHeaders,
-  mapModelToAzureConfig,
-} = require('librechat-data-provider');
+  isUserProvided,
+  getOpenAIConfig,
+  getAzureCredentials,
+  createHandleLLMNewToken,
+} = require('@librechat/api');
 const { getUserKeyValues, checkUserKeyExpiry } = require('~/server/services/UserService');
-const { getLLMConfig } = require('~/server/services/Endpoints/openAI/llm');
-const { isEnabled, isUserProvided } = require('~/server/utils');
-const { getAzureCredentials } = require('~/utils');
-const { OpenAIClient } = require('~/app');
+const OpenAIClient = require('~/app/clients/OpenAIClient');
 
 const initializeClient = async ({
   req,
@@ -54,7 +54,7 @@ const initializeClient = async ({
   let apiKey = userProvidesKey ? userValues?.apiKey : credentials[endpoint];
   let baseURL = userProvidesURL ? userValues?.baseURL : baseURLOptions[endpoint];
 
-  const clientOptions = {
+  let clientOptions = {
     contextStrategy,
     proxy: PROXY ?? null,
     debug: isEnabled(DEBUG_OPENAI),
@@ -65,22 +65,26 @@ const initializeClient = async ({
   const isAzureOpenAI = endpoint === EModelEndpoint.azureOpenAI;
   /** @type {false | TAzureConfig} */
   const azureConfig = isAzureOpenAI && req.app.locals[EModelEndpoint.azureOpenAI];
-
+  let serverless = false;
   if (isAzureOpenAI && azureConfig) {
     const { modelGroupMap, groupMap } = azureConfig;
     const {
       azureOptions,
       baseURL,
       headers = {},
-      serverless,
+      serverless: _serverless,
     } = mapModelToAzureConfig({
       modelName,
       modelGroupMap,
       groupMap,
     });
+    serverless = _serverless;
 
     clientOptions.reverseProxyUrl = baseURL ?? clientOptions.reverseProxyUrl;
-    clientOptions.headers = resolveHeaders({ ...headers, ...(clientOptions.headers ?? {}) });
+    clientOptions.headers = resolveHeaders(
+      { ...headers, ...(clientOptions.headers ?? {}) },
+      req.user,
+    );
 
     clientOptions.titleConvo = azureConfig.titleConvo;
     clientOptions.titleModel = azureConfig.titleModel;
@@ -97,6 +101,12 @@ const initializeClient = async ({
 
     apiKey = azureOptions.azureOpenAIApiKey;
     clientOptions.azure = !serverless && azureOptions;
+    if (serverless === true) {
+      clientOptions.defaultQuery = azureOptions.azureOpenAIApiVersion
+        ? { 'api-version': azureOptions.azureOpenAIApiVersion }
+        : undefined;
+      clientOptions.headers['api-key'] = apiKey;
+    }
   } else if (isAzureOpenAI) {
     clientOptions.azure = userProvidesKey ? JSON.parse(userValues.apiKey) : getAzureCredentials();
     apiKey = clientOptions.azure.azureOpenAIApiKey;
@@ -107,6 +117,7 @@ const initializeClient = async ({
 
   if (!isAzureOpenAI && openAIConfig) {
     clientOptions.streamRate = openAIConfig.streamRate;
+    clientOptions.titleModel = openAIConfig.titleModel;
   }
 
   /** @type {undefined | TBaseEndpoint} */
@@ -128,13 +139,24 @@ const initializeClient = async ({
   }
 
   if (optionsOnly) {
-    const requestOptions = Object.assign(
+    const modelOptions = endpointOption?.model_parameters ?? {};
+    modelOptions.model = modelName;
+    clientOptions = Object.assign({ modelOptions }, clientOptions);
+    clientOptions.modelOptions.user = req.user.id;
+    const options = getOpenAIConfig(apiKey, clientOptions);
+    if (options != null && serverless === true) {
+      options.useLegacyContent = true;
+    }
+    const streamRate = clientOptions.streamRate;
+    if (!streamRate) {
+      return options;
+    }
+    options.llmConfig.callbacks = [
       {
-        modelOptions: endpointOption.model_parameters,
+        handleLLMNewToken: createHandleLLMNewToken(streamRate),
       },
-      clientOptions,
-    );
-    return getLLMConfig(apiKey, requestOptions);
+    ];
+    return options;
   }
 
   const client = new OpenAIClient(apiKey, Object.assign({ req, res }, clientOptions));

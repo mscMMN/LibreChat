@@ -1,17 +1,18 @@
 import * as types from '../types';
 import * as r from '../roles';
+import * as p from '../permissions';
 import {
+  Tools,
   Assistant,
   AssistantCreateParams,
   AssistantUpdateParams,
-  ActionMetadata,
   FunctionTool,
   AssistantDocument,
-  Action,
   Agent,
   AgentCreateParams,
   AgentUpdateParams,
 } from './assistants';
+import { Action, ActionMetadata } from './agents';
 
 export type MutationOptions<
   Response,
@@ -23,6 +24,12 @@ export type MutationOptions<
   onSuccess?: (data: Response, variables: Request, context?: Context) => void;
   onMutate?: (variables: Request) => Snapshot | Promise<Snapshot>;
   onError?: (error: Error, variables: Request, context?: Context, snapshot?: Snapshot) => void;
+  onSettled?: (
+    data: Response | undefined,
+    error: Error | null,
+    variables: Request,
+    context?: Context,
+  ) => void;
 };
 
 export type TGenTitleRequest = {
@@ -41,8 +48,6 @@ export type PresetDeleteResponse = {
 export type UpdatePresetOptions = MutationOptions<types.TPreset, types.TPreset>;
 
 export type DeletePresetOptions = MutationOptions<PresetDeleteResponse, types.TPreset | undefined>;
-
-export type LogoutOptions = MutationOptions<unknown, undefined>;
 
 /* Assistant mutations */
 
@@ -123,7 +128,29 @@ export type UpdateAgentVariables = {
   data: AgentUpdateParams;
 };
 
-export type UpdateAgentMutationOptions = MutationOptions<Agent, UpdateAgentVariables>;
+export type DuplicateVersionError = Error & {
+  statusCode?: number;
+  details?: {
+    duplicateVersion?: unknown;
+    versionIndex?: number;
+  };
+};
+
+export type UpdateAgentMutationOptions = MutationOptions<
+  Agent,
+  UpdateAgentVariables,
+  unknown,
+  DuplicateVersionError
+>;
+
+export type DuplicateAgentBody = {
+  agent_id: string;
+};
+
+export type DuplicateAgentMutationOptions = MutationOptions<
+  { agent: Agent; actions: Action[] },
+  Pick<DuplicateAgentBody, 'agent_id'>
+>;
 
 export type DeleteAgentBody = {
   agent_id: string;
@@ -144,9 +171,26 @@ export type DeleteAgentActionVariables = {
 
 export type DeleteAgentActionOptions = MutationOptions<void, DeleteAgentActionVariables>;
 
+export type RevertAgentVersionVariables = {
+  agent_id: string;
+  version_index: number;
+};
+
+export type RevertAgentVersionOptions = MutationOptions<Agent, RevertAgentVersionVariables>;
+
 export type DeleteConversationOptions = MutationOptions<
   types.TDeleteConversationResponse,
   types.TDeleteConversationRequest
+>;
+
+export type ArchiveConversationOptions = MutationOptions<
+  types.TArchiveConversationResponse,
+  types.TArchiveConversationRequest
+>;
+
+export type DuplicateConvoOptions = MutationOptions<
+  types.TDuplicateConvoResponse,
+  types.TDuplicateConvoRequest
 >;
 
 export type ForkConvoOptions = MutationOptions<types.TForkConvoResponse, types.TForkConvoRequest>;
@@ -171,7 +215,12 @@ export type ArchiveConvoOptions = MutationOptions<
   types.TArchiveConversationRequest
 >;
 
-export type DeleteSharedLinkOptions = MutationOptions<types.TSharedLink, { shareId: string }>;
+export type DeleteSharedLinkContext = { previousQueries?: Map<string, TDeleteSharedLinkResponse> };
+export type DeleteSharedLinkOptions = MutationOptions<
+  TDeleteSharedLinkResponse,
+  { shareId: string },
+  DeleteSharedLinkContext
+>;
 
 export type TUpdatePromptContext =
   | {
@@ -222,18 +271,36 @@ export type RegistrationOptions = MutationOptions<
   types.TError
 >;
 
-export type UpdatePromptPermVars = {
+export type UpdatePermVars<T> = {
   roleName: string;
-  updates: Partial<r.TPromptPermissions>;
+  updates: Partial<T>;
 };
 
-export type UpdatePromptPermResponse = r.TRole;
+export type UpdatePromptPermVars = UpdatePermVars<p.TPromptPermissions>;
+export type UpdateMemoryPermVars = UpdatePermVars<p.TMemoryPermissions>;
+export type UpdateAgentPermVars = UpdatePermVars<p.TAgentPermissions>;
+
+export type UpdatePermResponse = r.TRole;
 
 export type UpdatePromptPermOptions = MutationOptions<
-  UpdatePromptPermResponse,
+  UpdatePermResponse,
   UpdatePromptPermVars,
   unknown,
-  types.TError
+  types.TError | null | undefined
+>;
+
+export type UpdateMemoryPermOptions = MutationOptions<
+  UpdatePermResponse,
+  UpdateMemoryPermVars,
+  unknown,
+  types.TError | null | undefined
+>;
+
+export type UpdateAgentPermOptions = MutationOptions<
+  UpdatePermResponse,
+  UpdateAgentPermVars,
+  unknown,
+  types.TError | null | undefined
 >;
 
 export type UpdateConversationTagOptions = MutationOptions<
@@ -251,3 +318,63 @@ export type AcceptTermsMutationOptions = MutationOptions<
 
 /* Tools */
 export type UpdatePluginAuthOptions = MutationOptions<types.TUser, types.TUpdateUserPlugins>;
+
+export type ToolParamsMap = {
+  [Tools.execute_code]: {
+    lang: string;
+    code: string;
+  };
+};
+
+export type ToolId = keyof ToolParamsMap;
+
+export type ToolParams<T extends ToolId> = ToolParamsMap[T] & {
+  messageId: string;
+  partIndex?: number;
+  blockIndex?: number;
+  conversationId: string;
+};
+export type ToolCallResponse = { result: unknown; attachments?: types.TAttachment[] };
+export type ToolCallMutationOptions<T extends ToolId> = MutationOptions<
+  ToolCallResponse,
+  ToolParams<T>
+>;
+
+export type TDeleteSharedLinkResponse = {
+  success: boolean;
+  shareId: string;
+  message: string;
+};
+
+export type TEditArtifactRequest = {
+  index: number;
+  messageId: string;
+  original: string;
+  updated: string;
+};
+
+export type TEditArtifactResponse = Pick<types.TMessage, 'content' | 'text' | 'conversationId'>;
+
+export type EditArtifactOptions = MutationOptions<
+  TEditArtifactResponse,
+  TEditArtifactRequest,
+  unknown,
+  Error
+>;
+
+export type TLogoutResponse = {
+  message: string;
+  redirect?: string;
+};
+
+export type LogoutOptions = MutationOptions<TLogoutResponse, undefined>;
+
+export interface AssistantInitialize {
+  message: string;
+  error?: string;
+}
+
+export interface CancelMCPOAuthResponse {
+  success: boolean;
+  message: string;
+}

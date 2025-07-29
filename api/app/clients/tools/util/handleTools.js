@@ -1,34 +1,32 @@
-const { Tools } = require('librechat-data-provider');
-const { ZapierToolKit } = require('langchain/agents');
-const { Calculator } = require('langchain/tools/calculator');
-const { SerpAPI, ZapierNLAWrapper } = require('langchain/tools');
-const { createCodeExecutionTool, EnvVar } = require('@librechat/agents');
-const { getUserPluginAuthValue } = require('~/server/services/PluginService');
+const { logger } = require('@librechat/data-schemas');
+const { SerpAPI } = require('@langchain/community/tools/serpapi');
+const { Calculator } = require('@langchain/community/tools/calculator');
+const { mcpToolPattern, loadWebSearchAuth } = require('@librechat/api');
+const { EnvVar, createCodeExecutionTool, createSearchTool } = require('@librechat/agents');
+const { Tools, EToolResources, replaceSpecialVars } = require('librechat-data-provider');
 const {
   availableTools,
+  manifestToolMap,
   // Basic Tools
-  CodeBrew,
-  AzureAISearch,
   GoogleSearchAPI,
-  WolframAlphaAPI,
-  OpenAICreateImage,
-  StableDiffusionAPI,
   // Structured Tools
   DALLE3,
-  E2BTools,
-  CodeSherpa,
+  FluxAPI,
+  OpenWeather,
   StructuredSD,
   StructuredACS,
-  CodeSherpaTools,
   TraversaalSearch,
   StructuredWolfram,
+  createYouTubeTools,
   TavilySearchResults,
+  createOpenAIImageTools,
 } = require('../');
-const { primeFiles } = require('~/server/services/Files/Code/process');
-const createFileSearchTool = require('./createFileSearchTool');
-const { loadToolSuite } = require('./loadToolSuite');
-const { loadSpecs } = require('./loadSpecs');
-const { logger } = require('~/config');
+const { primeFiles: primeCodeFiles } = require('~/server/services/Files/Code/process');
+const { createFileSearchTool, primeFiles: primeSearchFiles } = require('./fileSearch');
+const { getUserPluginAuthValue } = require('~/server/services/PluginService');
+const { loadAuthValues } = require('~/server/services/Tools/credentials');
+const { getCachedTools } = require('~/server/services/Config');
+const { createMCPTool } = require('~/server/services/MCP');
 
 /**
  * Validates the availability and authentication of tools for a user based on environment variables or user-specific plugin authentication values.
@@ -89,48 +87,12 @@ const validateTools = async (user, tools = []) => {
     return Array.from(validToolsSet.values());
   } catch (err) {
     logger.error('[validateTools] There was a problem validating tools', err);
-    throw new Error('There was a problem validating tools');
+    throw new Error(err);
   }
 };
 
-const loadAuthValues = async ({ userId, authFields }) => {
-  let authValues = {};
-
-  /**
-   * Finds the first non-empty value for the given authentication field, supporting alternate fields.
-   * @param {string[]} fields Array of strings representing the authentication fields. Supports alternate fields delimited by "||".
-   * @returns {Promise<{ authField: string, authValue: string} | null>} An object containing the authentication field and value, or null if not found.
-   */
-  const findAuthValue = async (fields) => {
-    for (const field of fields) {
-      let value = process.env[field];
-      if (value) {
-        return { authField: field, authValue: value };
-      }
-      try {
-        value = await getUserPluginAuthValue(userId, field);
-      } catch (err) {
-        if (field === fields[fields.length - 1] && !value) {
-          throw err;
-        }
-      }
-      if (value) {
-        return { authField: field, authValue: value };
-      }
-    }
-    return null;
-  };
-
-  for (let authField of authFields) {
-    const fields = authField.split('||');
-    const result = await findAuthValue(fields);
-    if (result) {
-      authValues[result.authField] = result.authValue;
-    }
-  }
-
-  return authValues;
-};
+/** @typedef {typeof import('@langchain/core/tools').Tool} ToolConstructor */
+/** @typedef {import('@langchain/core/tools').Tool} Tool */
 
 /**
  * Initializes a tool with authentication values for the given user, supporting alternate authentication fields.
@@ -138,9 +100,9 @@ const loadAuthValues = async ({ userId, authFields }) => {
  *
  * @param {string} userId The user ID for which the tool is being loaded.
  * @param {Array<string>} authFields Array of strings representing the authentication fields. Supports alternate fields delimited by "||".
- * @param {typeof import('langchain/tools').Tool} ToolConstructor The constructor function for the tool to be initialized.
+ * @param {ToolConstructor} ToolConstructor The constructor function for the tool to be initialized.
  * @param {Object} options Optional parameters to be passed to the tool constructor alongside authentication values.
- * @returns {Function} An Async function that, when called, asynchronously initializes and returns an instance of the tool with authentication.
+ * @returns {() => Promise<Tool>} An Async function that, when called, asynchronously initializes and returns an instance of the tool with authentication.
  */
 const loadToolWithAuth = (userId, authFields, ToolConstructor, options = {}) => {
   return async function () {
@@ -149,59 +111,57 @@ const loadToolWithAuth = (userId, authFields, ToolConstructor, options = {}) => 
   };
 };
 
+/**
+ * @param {string} toolKey
+ * @returns {Array<string>}
+ */
+const getAuthFields = (toolKey) => {
+  return manifestToolMap[toolKey]?.authConfig.map((auth) => auth.authField) ?? [];
+};
+
+/**
+ *
+ * @param {object} object
+ * @param {string} object.user
+ * @param {Pick<Agent, 'id' | 'provider' | 'model'>} [object.agent]
+ * @param {string} [object.model]
+ * @param {EModelEndpoint} [object.endpoint]
+ * @param {LoadToolOptions} [object.options]
+ * @param {boolean} [object.useSpecs]
+ * @param {Array<string>} object.tools
+ * @param {boolean} [object.functions]
+ * @param {boolean} [object.returnMap]
+ * @returns {Promise<{ loadedTools: Tool[], toolContextMap: Object<string, any> } | Record<string,Tool>>}
+ */
 const loadTools = async ({
   user,
+  agent,
   model,
-  functions = null,
-  returnMap = false,
+  endpoint,
   tools = [],
   options = {},
-  skipSpecs = false,
+  functions = true,
+  returnMap = false,
 }) => {
   const toolConstructors = {
-    tavily_search_results_json: TavilySearchResults,
+    flux: FluxAPI,
     calculator: Calculator,
     google: GoogleSearchAPI,
-    wolfram: functions ? StructuredWolfram : WolframAlphaAPI,
-    'dall-e': OpenAICreateImage,
-    'stable-diffusion': functions ? StructuredSD : StableDiffusionAPI,
-    'azure-ai-search': functions ? StructuredACS : AzureAISearch,
-    CodeBrew: CodeBrew,
+    open_weather: OpenWeather,
+    wolfram: StructuredWolfram,
+    'stable-diffusion': StructuredSD,
+    'azure-ai-search': StructuredACS,
     traversaal_search: TraversaalSearch,
+    tavily_search_results_json: TavilySearchResults,
   };
 
   const customConstructors = {
-    e2b_code_interpreter: async () => {
-      if (!functions) {
-        return null;
-      }
-
-      return await loadToolSuite({
-        pluginKey: 'e2b_code_interpreter',
-        tools: E2BTools,
-        user,
-        options: {
-          model,
-          ...options,
-        },
-      });
-    },
-    codesherpa_tools: async () => {
-      if (!functions) {
-        return null;
-      }
-
-      return await loadToolSuite({
-        pluginKey: 'codesherpa_tools',
-        tools: CodeSherpaTools,
-        user,
-        options,
-      });
-    },
-    serpapi: async () => {
-      let apiKey = process.env.SERPAPI_API_KEY;
+    serpapi: async (_toolContextMap) => {
+      const authFields = getAuthFields('serpapi');
+      let envVar = authFields[0] ?? '';
+      let apiKey = process.env[envVar];
       if (!apiKey) {
-        apiKey = await getUserPluginAuthValue(user, 'SERPAPI_API_KEY');
+        apiKey = await getUserPluginAuthValue(user, envVar);
       }
       return new SerpAPI(apiKey, {
         location: 'Austin,Texas,United States',
@@ -209,24 +169,51 @@ const loadTools = async ({
         gl: 'us',
       });
     },
-    zapier: async () => {
-      let apiKey = process.env.ZAPIER_NLA_API_KEY;
-      if (!apiKey) {
-        apiKey = await getUserPluginAuthValue(user, 'ZAPIER_NLA_API_KEY');
+    youtube: async (_toolContextMap) => {
+      const authFields = getAuthFields('youtube');
+      const authValues = await loadAuthValues({ userId: user, authFields });
+      return createYouTubeTools(authValues);
+    },
+    image_gen_oai: async (toolContextMap) => {
+      const authFields = getAuthFields('image_gen_oai');
+      const authValues = await loadAuthValues({ userId: user, authFields });
+      const imageFiles = options.tool_resources?.[EToolResources.image_edit]?.files ?? [];
+      let toolContext = '';
+      for (let i = 0; i < imageFiles.length; i++) {
+        const file = imageFiles[i];
+        if (!file) {
+          continue;
+        }
+        if (i === 0) {
+          toolContext =
+            'Image files provided in this request (their image IDs listed in order of appearance) available for image editing:';
+        }
+        toolContext += `\n\t- ${file.file_id}`;
+        if (i === imageFiles.length - 1) {
+          toolContext += `\n\nInclude any you need in the \`image_ids\` array when calling \`${EToolResources.image_edit}_oai\`. You may also include previously referenced or generated image IDs.`;
+        }
       }
-      const zapier = new ZapierNLAWrapper({ apiKey });
-      return ZapierToolKit.fromZapierNLAWrapper(zapier);
+      if (toolContext) {
+        toolContextMap.image_edit_oai = toolContext;
+      }
+      return createOpenAIImageTools({
+        ...authValues,
+        isAgent: !!agent,
+        req: options.req,
+        imageFiles,
+      });
     },
   };
 
   const requestedTools = {};
 
-  if (functions) {
+  if (functions === true) {
     toolConstructors.dalle = DALLE3;
-    toolConstructors.codesherpa = CodeSherpa;
   }
 
+  /** @type {ImageGenOptions} */
   const imageGenOptions = {
+    isAgent: !!agent,
     req: options.req,
     fileStrategy: options.fileStrategy,
     processFileURL: options.processFileURL,
@@ -235,45 +222,96 @@ const loadTools = async ({
   };
 
   const toolOptions = {
-    serpapi: { location: 'Austin,Texas,United States', hl: 'en', gl: 'us' },
+    flux: imageGenOptions,
     dalle: imageGenOptions,
-    'dall-e': imageGenOptions,
     'stable-diffusion': imageGenOptions,
+    serpapi: { location: 'Austin,Texas,United States', hl: 'en', gl: 'us' },
   };
 
-  const toolAuthFields = {};
-
-  availableTools.forEach((tool) => {
-    if (customConstructors[tool.pluginKey]) {
-      return;
-    }
-
-    toolAuthFields[tool.pluginKey] = tool.authConfig.map((auth) => auth.authField);
-  });
-
-  const remainingTools = [];
+  /** @type {Record<string, string>} */
+  const toolContextMap = {};
+  const cachedTools = (await getCachedTools({ userId: user, includeGlobal: true })) ?? {};
 
   for (const tool of tools) {
     if (tool === Tools.execute_code) {
-      const authValues = await loadAuthValues({
-        userId: user,
-        authFields: [EnvVar.CODE_API_KEY],
-      });
-      const files = await primeFiles(options, authValues[EnvVar.CODE_API_KEY]);
-      requestedTools[tool] = () =>
-        createCodeExecutionTool({
+      requestedTools[tool] = async () => {
+        const authValues = await loadAuthValues({
+          userId: user,
+          authFields: [EnvVar.CODE_API_KEY],
+        });
+        const codeApiKey = authValues[EnvVar.CODE_API_KEY];
+        const { files, toolContext } = await primeCodeFiles(
+          {
+            ...options,
+            agentId: agent?.id,
+          },
+          codeApiKey,
+        );
+        if (toolContext) {
+          toolContextMap[tool] = toolContext;
+        }
+        const CodeExecutionTool = createCodeExecutionTool({
           user_id: user,
           files,
           ...authValues,
         });
+        CodeExecutionTool.apiKey = codeApiKey;
+        return CodeExecutionTool;
+      };
       continue;
     } else if (tool === Tools.file_search) {
-      requestedTools[tool] = () => createFileSearchTool(options);
+      requestedTools[tool] = async () => {
+        const { files, toolContext } = await primeSearchFiles({
+          ...options,
+          agentId: agent?.id,
+        });
+        if (toolContext) {
+          toolContextMap[tool] = toolContext;
+        }
+        return createFileSearchTool({ req: options.req, files, entity_id: agent?.id });
+      };
+      continue;
+    } else if (tool === Tools.web_search) {
+      const webSearchConfig = options?.req?.app?.locals?.webSearch;
+      const result = await loadWebSearchAuth({
+        userId: user,
+        loadAuthValues,
+        webSearchConfig,
+      });
+      const { onSearchResults, onGetHighlights } = options?.[Tools.web_search] ?? {};
+      requestedTools[tool] = async () => {
+        toolContextMap[tool] = `# \`${tool}\`:
+Current Date & Time: ${replaceSpecialVars({ text: '{{iso_datetime}}' })}
+1. **Execute immediately without preface** when using \`${tool}\`.
+2. **After the search, begin with a brief summary** that directly addresses the query without headers or explaining your process.
+3. **Structure your response clearly** using Markdown formatting (Level 2 headers for sections, lists for multiple points, tables for comparisons).
+4. **Cite sources properly** according to the citation anchor format, utilizing group anchors when appropriate.
+5. **Tailor your approach to the query type** (academic, news, coding, etc.) while maintaining an expert, journalistic, unbiased tone.
+6. **Provide comprehensive information** with specific details, examples, and as much relevant context as possible from search results.
+7. **Avoid moralizing language.**
+`.trim();
+        return createSearchTool({
+          ...result.authResult,
+          onSearchResults,
+          onGetHighlights,
+          logger,
+        });
+      };
+      continue;
+    } else if (tool && cachedTools && mcpToolPattern.test(tool)) {
+      requestedTools[tool] = async () =>
+        createMCPTool({
+          req: options.req,
+          res: options.res,
+          toolKey: tool,
+          model: agent?.model ?? model,
+          provider: agent?.provider ?? endpoint,
+        });
       continue;
     }
 
     if (customConstructors[tool]) {
-      requestedTools[tool] = customConstructors[tool];
+      requestedTools[tool] = async () => customConstructors[tool](toolContextMap);
       continue;
     }
 
@@ -281,36 +319,12 @@ const loadTools = async ({
       const options = toolOptions[tool] || {};
       const toolInstance = loadToolWithAuth(
         user,
-        toolAuthFields[tool],
+        getAuthFields(tool),
         toolConstructors[tool],
         options,
       );
       requestedTools[tool] = toolInstance;
       continue;
-    }
-
-    if (functions) {
-      remainingTools.push(tool);
-    }
-  }
-
-  let specs = null;
-  if (functions && remainingTools.length > 0 && skipSpecs !== true) {
-    specs = await loadSpecs({
-      llm: model,
-      user,
-      message: options.message,
-      memory: options.memory,
-      signal: options.signal,
-      tools: remainingTools,
-      map: true,
-      verbose: false,
-    });
-  }
-
-  for (const tool of remainingTools) {
-    if (specs && specs[tool]) {
-      requestedTools[tool] = specs[tool];
     }
   }
 
@@ -318,28 +332,25 @@ const loadTools = async ({
     return requestedTools;
   }
 
-  // load tools
-  let result = [];
+  const toolPromises = [];
   for (const tool of tools) {
     const validTool = requestedTools[tool];
-    if (!validTool) {
-      continue;
-    }
-    const plugin = await validTool();
-
-    if (Array.isArray(plugin)) {
-      result = [...result, ...plugin];
-    } else if (plugin) {
-      result.push(plugin);
+    if (validTool) {
+      toolPromises.push(
+        validTool().catch((error) => {
+          logger.error(`Error loading tool ${tool}:`, error);
+          return null;
+        }),
+      );
     }
   }
 
-  return result;
+  const loadedTools = (await Promise.all(toolPromises)).flatMap((plugin) => plugin || []);
+  return { loadedTools, toolContextMap };
 };
 
 module.exports = {
   loadToolWithAuth,
-  loadAuthValues,
   validateTools,
   loadTools,
 };

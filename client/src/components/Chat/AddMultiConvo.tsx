@@ -5,7 +5,6 @@ import { useChatContext, useAddedChatContext } from '~/Providers';
 import { TooltipAnchor } from '~/components';
 import { mainTextareaId } from '~/common';
 import { useLocalize } from '~/hooks';
-import { cn } from '~/utils';
 
 function AddMultiConvo() {
   const { conversation } = useChatContext();
@@ -13,7 +12,6 @@ function AddMultiConvo() {
   const localize = useLocalize();
 
   const clickHandler = () => {
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const { title: _t, ...convo } = conversation ?? ({} as TConversation);
     setAddedConvo({
       ...convo,
@@ -43,7 +41,7 @@ function AddMultiConvo() {
       role="button"
       onClick={clickHandler}
       data-testid="parameters-button"
-      className="inline-flex size-10 items-center justify-center rounded-lg border border-border-light bg-transparent text-text-primary transition-all ease-in-out hover:bg-surface-tertiary disabled:pointer-events-none disabled:opacity-50 radix-state-open:bg-surface-tertiary"
+      className="inline-flex size-10 flex-shrink-0 items-center justify-center rounded-xl border border-border-light bg-transparent text-text-primary transition-all ease-in-out hover:bg-surface-tertiary disabled:pointer-events-none disabled:opacity-50 radix-state-open:bg-surface-tertiary"
     >
       <PlusCircle size={16} aria-label="Plus Icon" />
     </TooltipAnchor>

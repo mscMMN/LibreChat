@@ -1,9 +1,10 @@
 const fs = require('fs');
 const axios = require('axios');
 const FormData = require('form-data');
+const { logAxiosError } = require('@librechat/api');
+const { logger } = require('@librechat/data-schemas');
 const { FileSources } = require('librechat-data-provider');
-const { logAxiosError } = require('~/utils');
-const { logger } = require('~/config');
+const { generateShortLivedToken } = require('~/server/services/AuthService');
 
 /**
  * Deletes a file from the vector database. This function takes a file object, constructs the full path, and
@@ -23,7 +24,8 @@ const deleteVectors = async (req, file) => {
     return;
   }
   try {
-    const jwtToken = req.headers.authorization.split(' ')[1];
+    const jwtToken = generateShortLivedToken(req.user.id);
+
     return await axios.delete(`${process.env.RAG_API_URL}/documents`, {
       headers: {
         Authorization: `Bearer ${jwtToken}`,
@@ -37,7 +39,14 @@ const deleteVectors = async (req, file) => {
       error,
       message: 'Error deleting vectors',
     });
-    throw new Error(error.message || 'An error occurred during file deletion.');
+    if (
+      error.response &&
+      error.response.status !== 404 &&
+      (error.response.status < 200 || error.response.status >= 300)
+    ) {
+      logger.warn('Error deleting vectors, file will not be deleted');
+      throw new Error(error.message || 'An error occurred during file deletion.');
+    }
   }
 };
 
@@ -50,24 +59,28 @@ const deleteVectors = async (req, file) => {
  * @param {Express.Multer.File} params.file - The file object, which is part of the request. The file object should
  *                                     have a `path` property that points to the location of the uploaded file.
  * @param {string} params.file_id - The file ID.
+ * @param {string} [params.entity_id] - The entity ID for shared resources.
  *
  * @returns {Promise<{ filepath: string, bytes: number }>}
  *          A promise that resolves to an object containing:
  *            - filepath: The path where the file is saved.
  *            - bytes: The size of the file in bytes.
  */
-async function uploadVectors({ req, file, file_id }) {
+async function uploadVectors({ req, file, file_id, entity_id }) {
   if (!process.env.RAG_API_URL) {
     throw new Error('RAG_API_URL not defined');
   }
 
   try {
-    const jwtToken = req.headers.authorization.split(' ')[1];
+    const jwtToken = generateShortLivedToken(req.user.id);
     const formData = new FormData();
     formData.append('file_id', file_id);
     formData.append('file', fs.createReadStream(file.path));
+    if (entity_id != null && entity_id) {
+      formData.append('entity_id', entity_id);
+    }
 
-    const formHeaders = formData.getHeaders(); // Automatically sets the correct Content-Type
+    const formHeaders = formData.getHeaders();
 
     const response = await axios.post(`${process.env.RAG_API_URL}/embed`, formData, {
       headers: {

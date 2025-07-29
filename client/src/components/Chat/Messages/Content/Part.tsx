@@ -7,34 +7,55 @@ import {
 } from 'librechat-data-provider';
 import { memo } from 'react';
 import type { TMessageContentParts, TAttachment } from 'librechat-data-provider';
+import { OpenAIImageGen, EmptyText, Reasoning, ExecuteCode, AgentUpdate, Text } from './Parts';
 import { ErrorMessage } from './MessageContent';
-import ExecuteCode from './Parts/ExecuteCode';
 import RetrievalCall from './RetrievalCall';
 import CodeAnalyze from './CodeAnalyze';
 import Container from './Container';
+import WebSearch from './WebSearch';
 import ToolCall from './ToolCall';
 import ImageGen from './ImageGen';
-import Text from './Parts/Text';
 import Image from './Image';
 
 type PartProps = {
   part?: TMessageContentParts;
+  isLast?: boolean;
   isSubmitting: boolean;
   showCursor: boolean;
-  messageId: string;
   isCreatedByUser: boolean;
   attachments?: TAttachment[];
 };
 
 const Part = memo(
-  ({ part, isSubmitting, attachments, showCursor, messageId, isCreatedByUser }: PartProps) => {
-    attachments && console.log(attachments);
+  ({ part, isSubmitting, attachments, isLast, showCursor, isCreatedByUser }: PartProps) => {
     if (!part) {
       return null;
     }
 
     if (part.type === ContentTypes.ERROR) {
-      return <ErrorMessage text={part[ContentTypes.TEXT].value} className="my-2" />;
+      return (
+        <ErrorMessage
+          text={
+            part[ContentTypes.ERROR] ??
+            (typeof part[ContentTypes.TEXT] === 'string'
+              ? part[ContentTypes.TEXT]
+              : part.text?.value) ??
+            ''
+          }
+          className="my-2"
+        />
+      );
+    } else if (part.type === ContentTypes.AGENT_UPDATE) {
+      return (
+        <>
+          <AgentUpdate currentAgentId={part[ContentTypes.AGENT_UPDATE]?.agentId} />
+          {isLast && showCursor && (
+            <Container>
+              <EmptyText />
+            </Container>
+          )}
+        </>
+      );
     } else if (part.type === ContentTypes.TEXT) {
       const text = typeof part.text === 'string' ? part.text : part.text.value;
 
@@ -46,14 +67,15 @@ const Part = memo(
       }
       return (
         <Container>
-          <Text
-            text={text}
-            isCreatedByUser={isCreatedByUser}
-            messageId={messageId}
-            showCursor={showCursor}
-          />
+          <Text text={text} isCreatedByUser={isCreatedByUser} showCursor={showCursor} />
         </Container>
       );
+    } else if (part.type === ContentTypes.THINK) {
+      const reasoning = typeof part.think === 'string' ? part.think : part.think.value;
+      if (typeof reasoning !== 'string') {
+        return null;
+      }
+      return <Reasoning reasoning={reasoning} />;
     } else if (part.type === ContentTypes.TOOL_CALL) {
       const toolCall = part[ContentTypes.TOOL_CALL];
 
@@ -63,24 +85,50 @@ const Part = memo(
 
       const isToolCall =
         'args' in toolCall && (!toolCall.type || toolCall.type === ToolCallTypes.TOOL_CALL);
-      if (isToolCall && toolCall.name === Tools.execute_code) {
+      if (isToolCall && toolCall.name === Tools.execute_code && toolCall.args) {
         return (
           <ExecuteCode
             args={typeof toolCall.args === 'string' ? toolCall.args : ''}
             output={toolCall.output ?? ''}
             initialProgress={toolCall.progress ?? 0.1}
+            attachments={attachments}
+          />
+        );
+      } else if (
+        isToolCall &&
+        (toolCall.name === 'image_gen_oai' || toolCall.name === 'image_edit_oai')
+      ) {
+        return (
+          <OpenAIImageGen
+            initialProgress={toolCall.progress ?? 0.1}
+            isSubmitting={isSubmitting}
+            toolName={toolCall.name}
+            args={typeof toolCall.args === 'string' ? toolCall.args : ''}
+            output={toolCall.output ?? ''}
+            attachments={attachments}
+          />
+        );
+      } else if (isToolCall && toolCall.name === Tools.web_search) {
+        return (
+          <WebSearch
+            output={toolCall.output ?? ''}
+            initialProgress={toolCall.progress ?? 0.1}
             isSubmitting={isSubmitting}
             attachments={attachments}
+            isLast={isLast}
           />
         );
       } else if (isToolCall) {
         return (
           <ToolCall
             args={toolCall.args ?? ''}
-            name={toolCall.name ?? ''}
+            name={toolCall.name || ''}
             output={toolCall.output ?? ''}
             initialProgress={toolCall.progress ?? 0.1}
             isSubmitting={isSubmitting}
+            attachments={attachments}
+            auth={toolCall.auth}
+            expires_at={toolCall.expires_at}
           />
         );
       } else if (toolCall.type === ToolCallTypes.CODE_INTERPRETER) {
@@ -90,7 +138,6 @@ const Part = memo(
             initialProgress={toolCall.progress ?? 0.1}
             code={code_interpreter.input}
             outputs={code_interpreter.outputs ?? []}
-            isSubmitting={isSubmitting}
           />
         );
       } else if (
@@ -116,12 +163,7 @@ const Part = memo(
           if (isSubmitting && showCursor) {
             return (
               <Container>
-                <Text
-                  text={''}
-                  isCreatedByUser={isCreatedByUser}
-                  messageId={messageId}
-                  showCursor={showCursor}
-                />
+                <Text text={''} isCreatedByUser={isCreatedByUser} showCursor={showCursor} />
               </Container>
             );
           }

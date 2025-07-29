@@ -2,6 +2,8 @@ import { useEffect } from 'react';
 import { EToolResources } from 'librechat-data-provider';
 import type { ExtendedFile } from '~/common';
 import { useDeleteFilesMutation } from '~/data-provider';
+import { useToastContext } from '~/Providers';
+import { useLocalize } from '~/hooks';
 import { useFileDeletion } from '~/hooks/Files';
 import FileContainer from './FileContainer';
 import { logger } from '~/utils';
@@ -30,6 +32,8 @@ export default function FileRow({
   isRTL?: boolean;
   Wrapper?: React.FC<{ children: React.ReactNode }>;
 }) {
+  const localize = useLocalize();
+  const { showToast } = useToastContext();
   const files = Array.from(_files?.values() ?? []).filter((file) =>
     fileFilter ? fileFilter(file) : true,
   );
@@ -73,8 +77,22 @@ export default function FileRow({
   }
 
   const renderFiles = () => {
-    // Inline style for RTL
-    const rowStyle = isRTL ? { display: 'flex', flexDirection: 'row-reverse' } : {};
+    const rowStyle = isRTL
+      ? {
+          display: 'flex',
+          flexDirection: 'row-reverse',
+          flexWrap: 'wrap',
+          gap: '4px',
+          width: '100%',
+          maxWidth: '100%',
+        }
+      : {
+          display: 'flex',
+          flexWrap: 'wrap',
+          gap: '4px',
+          width: '100%',
+          maxWidth: '100%',
+        };
 
     return (
       <div style={rowStyle as React.CSSProperties}>
@@ -91,24 +109,38 @@ export default function FileRow({
           )
           .uniqueFiles.map((file: ExtendedFile, index: number) => {
             const handleDelete = () => {
+              showToast({
+                message: localize('com_ui_deleting_file'),
+                status: 'info',
+              });
               if (abortUpload && file.progress < 1) {
                 abortUpload();
               }
               deleteFile({ file, setFiles });
             };
             const isImage = file.type?.startsWith('image') ?? false;
-            if (isImage) {
-              return (
-                <Image
-                  key={index}
-                  url={file.preview ?? file.filepath}
-                  onDelete={handleDelete}
-                  progress={file.progress}
-                  source={file.source}
-                />
-              );
-            }
-            return <FileContainer key={index} file={file} onDelete={handleDelete} />;
+
+            return (
+              <div
+                key={index}
+                style={{
+                  flexBasis: '70px',
+                  flexGrow: 0,
+                  flexShrink: 0,
+                }}
+              >
+                {isImage ? (
+                  <Image
+                    url={file.preview ?? file.filepath}
+                    onDelete={handleDelete}
+                    progress={file.progress}
+                    source={file.source}
+                  />
+                ) : (
+                  <FileContainer file={file} onDelete={handleDelete} />
+                )}
+              </div>
+            );
           })}
       </div>
     );
